@@ -44,7 +44,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 ```CodeBuddy``` 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
-📖 完整文档见 [GitHub Wiki](https://github.com/Sliverkiss/workbuddy2api/wiki)。
+📖 完整文档见 [GitHub Wiki](https://github.com/Sliverkiss/workbuddy2api/wiki)（上游仓库；本 fork 的 Wiki 未同步，链接指向上游）。
 
 ## 核心能力
 
@@ -143,7 +143,7 @@ flowchart LR
 ### Docker Compose 一键部署
 
 ```bash
-git clone https://github.com/Sliverkiss/workbuddy2api.git
+git clone https://github.com/sundys/workbuddy2api.git
 cd workbuddy2api
 cp config.example.json config.json
 ```
@@ -274,7 +274,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ```bash
 # 公网部署示例（本仓库的 fork 同理，换成 <你的用户名>/workbuddy2api）
-docker pull ghcr.io/sliverkiss/workbuddy2api:latest
+docker pull ghcr.io/sundys/workbuddy2api:latest
 ```
 
 **tag 策略**
@@ -290,7 +290,7 @@ docker pull ghcr.io/sliverkiss/workbuddy2api:latest
 # docker-compose.yml：把 build: . 换成 image，其余（端口 / 卷 / TZ）原样保留
 services:
   wb2api:
-    image: ghcr.io/sliverkiss/workbuddy2api:latest
+    image: ghcr.io/sundys/workbuddy2api:latest
     container_name: workbuddy2api
     restart: unless-stopped
     environment:
@@ -386,7 +386,7 @@ chown -R 10001:10001 ./auths ./data
 
 - **CI 自动打包**：GitHub Actions（`.github/workflows/build.yml`）每日定时 + push tag + 手动触发多架构（amd64/arm64）构建，发布至 `ghcr.io`，同时输出双架构离线 `tar.gz` artifact 供 NAS / 离线环境使用；详见 [CI 与镜像发布](#ci-与镜像发布)，也可本地 `docker compose build` 自构建
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **镜像可信源**：发布镜像来自本仓库 CI 直接构建（`permissions.packages: write` 的 `GITHUB_TOKEN` 推送），仅 `FROM golang:1.26-alpine` / `alpine:3.20` 官方基础镜像；`go.sum` 约束 Go 模块依赖，镜像完整性由 ghcr 的镜像摘要（digest）承载，拉取可 `docker pull ghcr.io/sliverkiss/workbuddy2api@sha256:...` 锁定摘要
+- **镜像可信源**：发布镜像来自本仓库 CI 直接构建（`permissions.packages: write` 的 `GITHUB_TOKEN` 推送），仅 `FROM golang:1.26-alpine` / `alpine:3.20` 官方基础镜像；`go.sum` 约束 Go 模块依赖，镜像完整性由 ghcr 的镜像摘要（digest）承载，拉取可 `docker pull ghcr.io/sundys/workbuddy2api@sha256:...` 锁定摘要
 - 上游 CodeBuddy 属第三方商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 授权使用边界
