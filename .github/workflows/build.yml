@@ -1,4 +1,4 @@
-# build.yml 定时多架构打包发布 ghcr.io + amd64 离线 tar.gz artifact。
+# build.yml 定时多架构打包发布 ghcr.io + 双架构离线 tar.gz artifact。
 # 解决 issue #21「建议打包现成 docker 镜像」：NAS/离线环境拉不到 ghcr 时用 artifact。
 # 参考 /tmp/wb2api-build，适配本仓库（workflow 就住在仓库里，无需双 checkout 覆盖 Dockerfile）。
 name: Build & Publish
@@ -13,6 +13,12 @@ on:
   push:
     tags: ['v*'] # 打 tag 也触发发布
 
+# 定时 / 手动 / tag 可能撞车：同组串行，但不取消进行中的发布（中途取消会留下
+# 只有部分架构的清单，或把正在写的 gha 缓存截断）。
+concurrency:
+  group: build-publish
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
@@ -22,9 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Create config.json for build
-        run: cp config.example.json config.json
 
       # setup-qemu 必须在 setup-buildx 之前：buildx 多架构依赖 QEMU 跨平台模拟。
       - name: Set up QEMU
@@ -40,33 +43,77 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ghcr 镜像名必须全小写：github.repository 含大写（Sliverkiss/...），需转小写
-      - name: Compute image name (lowercase)
+      # ghcr 镜像名必须全小写：github.repository 含大写（Sliverkiss/...），需转小写。
+      # tag 策略：
+      #   永远 commit short sha，供精确定位构建来源；
+      #   非预发布（含定时/手动/稳定 tag）刷新 latest，供 NAS 滚动升级；
+      #   v* tag 追加语义版本——v1.2.3 → :v1.2.3 :1.2 :1，纯数字版本才派生次/主版本，
+      #   派生可能重复（v2.0 → 两个 :2），统一排序去重；预发布（v1.2.3-rc1）只落
+      #   完整 tag 且不碰 latest，避免候选版顶掉稳定通道。
+      - name: Compute image name & tags
         id: image
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          name="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags="$name:${GITHUB_SHA::12}"
+          prerelease=false
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF#refs/tags/}"; bare="${ver#v}"
+            tags="$tags"$'\n'"$name:$ver"
+            if [[ "$bare" == *"-"* ]]; then
+              prerelease=true
+            elif [[ "$bare" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+              tags="$tags"$'\n'"$name:${bare%.*}"$'\n'"$name:${bare%%.*}"
+            fi
+          fi
+          [[ "$prerelease" == false ]] && tags="$tags"$'\n'"$name:latest"
+          {
+            echo "name=$name"
+            echo "tags<<TAGS_EOF"
+            sort -u <<< "$tags"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
+      # 镜像不含真实配置：.dockerignore 排除 config.json，Dockerfile 只落
+      # config.example.json 作占位，生产配置由挂载卷 /app/config.json 覆盖（见 README
+      # 「配置与数据持久化」），因此构建上下文无需先生成 config.json。
       - name: Build & push multi-arch
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ steps.image.outputs.name }}:latest
-            ${{ steps.image.outputs.name }}:${{ github.sha }}
+          tags: ${{ steps.image.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 额外导出 amd64 离线 tar.gz：NAS 拉不到 ghcr 时用 artifact 部署。
-      - name: Export offline tarball (amd64)
+  # 双架构离线包：NAS / 内网拉不到 ghcr 时，从 workflow artifact 下载本地 docker load。
+  # arm64 与 amd64 并行导出（--output type=docker 只能单架构，故按 matrix 拆两份）；
+  # 只读 gha 缓存加速（缓存写入归 build 任务，避免 matrix 两端互相覆盖）。
+  offline:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Export offline tarball (${{ matrix.arch }})
         run: |
-          docker buildx build --platform linux/amd64 --file Dockerfile \
-            --tag wb2api:offline --output type=docker,dest=wb2api-amd64.tar .
-          gzip -f wb2api-amd64.tar
+          docker buildx build --platform linux/${{ matrix.arch }} --file Dockerfile \
+            --cache-from type=gha \
+            --tag wb2api:offline --output type=docker,dest=wb2api-${{ matrix.arch }}.tar .
+          gzip -f wb2api-${{ matrix.arch }}.tar
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wb2api-amd64
-          path: wb2api-amd64.tar.gz
+          name: wb2api-${{ matrix.arch }}
+          path: wb2api-${{ matrix.arch }}.tar.gz
           if-no-files-found: error

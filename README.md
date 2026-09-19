@@ -13,6 +13,7 @@
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22.5-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
+  <a href="../../actions/workflows/build.yml"><img alt="CI" src="https://img.shields.io/badge/CI-GHCR_%E5%8F%8C%E6%9E%B6%E6%9E%84-2088FF?logo=githubactions&logoColor=white&style=flat-square"></a>
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
   <a href="https://t.me/sliverkiss_blog"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-%E9%A2%91%E9%81%93-blue?logo=telegram&logoColor=white&style=flat-square"></a>
 </p>
@@ -252,13 +253,140 @@ curl -s http://localhost:7863/v1/chat/completions \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
+## CI 与镜像发布
+
+构建由 `.github/workflows/build.yml` 驱动，无需本地装 Go / 编译，直接拉现成镜像即可部署。
+
+**触发时机**
+
+- 每天北京时间 **12:23** 定时构建（错峰：GitHub schedule 整点高峰排队严重，曾出现排队迟到 5h+ 甚至被静默丢弃）
+- Actions 页面 `workflow_dispatch` 手动触发（可指定分支）
+- 推送 `v*` tag 触发发布（如 `git tag v1.2.3 && git push origin v1.2.3`）
+
+**构建产物**
+
+| 产物 | 架构 | 说明 |
+| --- | --- | --- |
+| ghcr 镜像 | `linux/amd64` + `linux/arm64` | 多架构 manifest，`docker pull` 按宿主架构自动选层；x86 服务器、Apple Silicon、ARM NAS 通用 |
+| `wb2api-amd64` / `wb2api-arm64` artifact | 各自单架构 | 离线 `tar.gz`，拉不到 ghcr 的内网 / NAS 环境从 Actions 页面下载后 `docker load` |
+
+镜像地址为 `ghcr.io/<仓库全名转小写>`（GHCR 要求全小写，仓库名含大写时 buildx 会拒绝）：
+
+```bash
+# 公网部署示例（本仓库的 fork 同理，换成 <你的用户名>/workbuddy2api）
+docker pull ghcr.io/sliverkiss/workbuddy2api:latest
+```
+
+**tag 策略**
+
+- `:latest` —— 稳定通道，定时 / 手动 / 稳定版 tag 构建都会刷新
+- `:<commit 短 sha>` —— 每次构建固定打，用于精确回溯到某次提交（排障时对齐版本与代码）
+- `v1.2.3` —— 打 tag 时追加，并派生 `:1.2` `:1`，方便按大版本 / 次版本锁定
+- 预发布（如 `v1.2.3-rc1`）**只落完整 tag，不刷新 `:latest`**，候选版不会顶掉稳定通道
+
+**直接用已发布镜像部署**（替代 `docker compose up -d --build` 的本地构建）：
+
+```yaml
+# docker-compose.yml：把 build: . 换成 image，其余（端口 / 卷 / TZ）原样保留
+services:
+  wb2api:
+    image: ghcr.io/sliverkiss/workbuddy2api:latest
+    container_name: workbuddy2api
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "7863:7863"
+    volumes:
+      - ./auths:/app/auths
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
+```
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+**离线部署（NAS / 内网）**
+
+1. 仓库 Actions 页 → `Build & Publish` → 最新一次运行 → 页面底部 Artifacts 下载 `wb2api-arm64`（或 `wb2api-amd64`）
+2. 传到目标机器后导入， compose 里把 `build: .` 换成 `image: wb2api:offline`：
+
+   ```bash
+   gunzip -c wb2api-arm64.tar.gz | docker load
+   # Loaded image: wb2api:offline
+   ```
+
+3. artifact 保留 90 天；需要更新就重新下一次，或在内网用 `docker save` 自行归档
+
+**构建细节**
+
+- 多架构依赖 QEMU 跨平台模拟（`setup-qemu` 必须在 `setup-buildx` 之前注册），ARM64 构建因模拟执行较慢属正常
+- 层缓存走 `type=gha`（GitHub Actions cache）：重复构建只重编变更的层；离线包任务只读缓存，写入归主构建任务，避免双架构任务互相覆盖
+- 推送凭据用触发者身份（`github.actor`）+ 仓库内置的 `GITHUB_TOKEN`（`permissions.packages: write`），无需额外配 secret；镜像默认继承仓库可见性，私有仓库需先 `docker login ghcr.io` 再 pull
+- 同组构建串行排队但不取消进行中的任务（取消会留下只推了一部分架构的 manifest）
+
+## 配置与数据持久化
+
+镜像**不内置任何真实配置**：`.dockerignore` 排除 `config.json`，Dockerfile 只落 `config.example.json` 作占位。生产配置由挂载卷 `/app/config.json` 覆盖。容器内全部可写路径属于 `app(uid 10001)`。
+
+### 三层挂载卷
+
+| 宿主路径 | 容器路径 | 作用 | 读写 |
+| --- | --- | --- | --- |
+| `./config.json` | `/app/config.json` | 网关配置（启动时读一次） | 只读挂载 |
+| `./auths/` | `/app/auths/` | OAuth 凭证 `workbuddy-<uid>.json`（0600），目录热加载 | 读写（refresh 走 tmp+rename，需**目录**写权限） |
+| `./data/` | `/app/data/` | 池状态 `state.json`、模型目录缓存 `model.json` | 读写 |
+
+> **不挂载 config.json 的风险**：容器会以镜像内的示例配置启动，其中 `api_key` 是仓库里公开的占位值 `test_key`——等于任何读过本仓库的人都能调你的网关。要么挂载自己的 `config.json`，要么用环境变量 `WB2A_API_KEY` 覆盖。`api_key` 留空 = 完全不鉴权，公网部署务必设置。
+
+### 配置优先级与热更新
+
+```
+WB2A_* 环境变量  >  config.json  >  内置默认值
+```
+
+配置只在**进程启动时**加载一次（`cmd/server/config.go` 的 `Load`），没有运行时热重载——改完配置重启进程即可，容器不重建：
+
+```bash
+docker compose restart wb2api
+```
+
+常用环境变量覆盖（完整列表见 `cmd/server/config.go` 的 `applyEnv`，`WB2A_*` 前缀）：
+
+| 环境变量 | 覆盖字段 | 备注 |
+| --- | --- | --- |
+| `WB2A_API_KEY` | `api_key` | 非空才覆盖；K8s / compose 注入密钥的推荐方式 |
+| `WB2A_LISTEN` | `listen` | 如 `127.0.0.1:7863` |
+| `WB2A_AUTH_DIR` / `WB2A_STATE_FILE` | `auth_dir` / `state_file` | 改挂载路径时配套调整 |
+| `WB2A_TIMEOUT_SECONDS` | `upstream.timeout_seconds` | 短 RPC 总时长上限 |
+| `WB2A_ADMIN_ENABLED` | `admin.enabled` | 与 `api_key` 有 fail-fast 联动：开启管理端点但 `api_key` 为空会**拒绝启动** |
+| `WB2A_USER_AGENT` / `WB2A_CLIENT_VERSION` / `WB2A_CLI_VERSION` | 出站指纹相关 | 空值走内置默认三段式 UA |
+
+### 运行态持久化
+
+- **`data/state.json`** —— 账号池运行态：冷却剩余、熔断计数、连败降权计数、积分余额、`usedSeq` / `lastUsed` 等。后台每 **5 秒**检查脏标并落盘；收到 `SIGTERM` / `SIGINT`（`docker compose stop` / `restart`）会**先补一次落盘再优雅停机**，所以正常停启不丢运行态。直接 `docker kill` 或 OOM 才可能丢最多 5 秒的增量。
+- **`data/model.json`** —— 模型目录缓存（`context_length` 查找链的一级本地缓存），路径由 `state_file` 同目录推导而来；缺失 / 损坏自动回落仓库种子，远端拉取成功后原子写回。
+- **auths 目录热加载** —— 新增凭证文件自动进池，**免去「加完账号手动重启网关」**；删除文件则账号出池（状态保留）。基线在启动时由 `SyncToDir` 建立，监听只对后续变化触发。
+- **Upstash / Redis（可选）** —— 配置 `upstash.url` + `upstash.token` 后，池状态在本地 `state.json` 之外再镜像一份快照。启动时**择新恢复**：本地不可用（新卷 / 新节点）时用快照，两者都在则取较新者；未配置或连不上自动降级为 Noop 纯内存模式，功能不受影响。
+
+### 权限（uid 10001）
+
+容器以非 root 用户 `app(uid 10001)` 运行。宿主侧若以别的 uid（常见的 Linux 非 root 用户 uid 1000）落盘 `auths/` 或 `data/`，容器会读不到或写不进——`/status` 账号数为 0、`state.json` 报 permission denied 都根源于此。首次部署或换宿主用户后执行一次：
+
+```bash
+chown -R 10001:10001 ./auths ./data
+```
+
+之后新增账号建议直接进容器登录，凭证由 `app` 自身落盘，属主即 10001，免反复 chown（见上文「Docker Compose 一键部署」的说明）。
+
 ## 安全与合规
 
 ### 发布来源与合规边界
 
-- **CI 自动打包**：GitHub Actions（`.github/workflows/build.yml`）每日定时 + push tag 触发多架构（amd64/arm64）构建，发布至 `ghcr.io`，同时输出 amd64 离线 `tar.gz` artifact 供 NAS / 离线环境使用；也可本地 `docker compose build` 自构建
+- **CI 自动打包**：GitHub Actions（`.github/workflows/build.yml`）每日定时 + push tag + 手动触发多架构（amd64/arm64）构建，发布至 `ghcr.io`，同时输出双架构离线 `tar.gz` artifact 供 NAS / 离线环境使用；详见 [CI 与镜像发布](#ci-与镜像发布)，也可本地 `docker compose build` 自构建
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
+- **镜像可信源**：发布镜像来自本仓库 CI 直接构建（`permissions.packages: write` 的 `GITHUB_TOKEN` 推送），仅 `FROM golang:1.26-alpine` / `alpine:3.20` 官方基础镜像；`go.sum` 约束 Go 模块依赖，镜像完整性由 ghcr 的镜像摘要（digest）承载，拉取可 `docker pull ghcr.io/sliverkiss/workbuddy2api@sha256:...` 锁定摘要
 - 上游 CodeBuddy 属第三方商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 授权使用边界
