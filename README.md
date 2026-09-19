@@ -261,7 +261,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 - 每天北京时间 **12:23** 定时构建（错峰：GitHub schedule 整点高峰排队严重，曾出现排队迟到 5h+ 甚至被静默丢弃）
 - Actions 页面 `workflow_dispatch` 手动触发（可指定分支）
-- 推送 `v*` tag 触发发布（如 `git tag v1.2.3 && git push origin v1.2.3`）
+- 推送 `v*` tag 触发发布（如 `git tag v1.2.3 && git push origin v1.2.3`），同时自动创建 GitHub Release 并挂载双架构离线包
 
 **构建产物**
 
@@ -283,6 +283,7 @@ docker pull ghcr.io/sundys/workbuddy2api:latest
 - `:<commit 短 sha>` —— 每次构建固定打，用于精确回溯到某次提交（排障时对齐版本与代码）
 - `v1.2.3` —— 打 tag 时追加，并派生 `:1.2` `:1`，方便按大版本 / 次版本锁定
 - 预发布（如 `v1.2.3-rc1`）**只落完整 tag，不刷新 `:latest`**，候选版不会顶掉稳定通道
+- 打 tag 同时自动建 GitHub Release（`release` 任务，`contents: write` 权限），正文带自动生成的变更摘要 + 镜像 / 离线部署说明，并把两个离线包作为 Release asset 挂载
 
 **直接用已发布镜像部署**（替代 `docker compose up -d --build` 的本地构建）：
 
@@ -317,7 +318,7 @@ docker compose pull && docker compose up -d
    # Loaded image: wb2api:offline
    ```
 
-3. artifact 保留 90 天；需要更新就重新下一次，或在内网用 `docker save` 自行归档
+3. artifact 保留 90 天；`v*` tag 发布时同样的包会挂到 GitHub Release（永久归档），长期使用优先从 Release 下载，或在内网用 `docker save` 自行归档
 
 **构建细节**
 
