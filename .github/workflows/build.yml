@@ -160,12 +160,15 @@ jobs:
             echo "NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # generate_release_notes=true 会让 GitHub 用 tag 所指 commit 的提交说明
+      # 自动生成正文并覆盖 body（v1.2.0 实证：正文是 commit message 而非 tag 注解）。
+      # 关掉它，正文改由 tag 注解承载（打 tag 时 -m 写清行为变化）。
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          generate_release_notes: true
+          generate_release_notes: false
           files: wb2api-*.tar.gz
           body: |
             ${{ steps.notes.outputs.notes }}
