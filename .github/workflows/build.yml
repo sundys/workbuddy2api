@@ -150,6 +150,10 @@ jobs:
           generate_release_notes: true
           files: wb2api-*.tar.gz
           body: |
+            ${{ github.event.head_commit.message }}
+
+            ---
+
             ## 镜像
 
             ```bash
