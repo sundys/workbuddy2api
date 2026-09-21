@@ -146,14 +146,19 @@ jobs:
       - name: Stage assets
         run: mv release-assets/*.tar.gz . && ls -lh wb2api-*.tar.gz
 
-      # 取 tag 注解正文（annotated tag 的多行说明）。push tag 事件下 head_commit
-      # 指向 master 最新提交而非 tag 指向的提交，不能用；tag 说明才是发版时要给人看的。
-      # 未注解 tag / 空说明 → 空字符串，正文回落到镜像与离线部署说明。
+      # 取 tag 注解正文（subject + body）。push tag 事件下 head_commit 指向 master
+      # 最新提交而非 tag 指向的提交（v1.1.1 实证），不能用于发版说明；tag 注解才是。
+      # printf 的 %s 遇多行参数只格式化首行（v1.1.3 实证）→ 直接 cat 文件进 heredoc。
       - name: Extract tag notes
         id: notes
         run: |
-          body="$(git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "${{ github.ref_name }}")"
-          printf 'notes<<NOTES_EOF\n%s\nNOTES_EOF\n' "$body" >> "$GITHUB_OUTPUT"
+          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' \
+            "${{ github.ref_name }}" > /tmp/tag_notes.txt
+          {
+            echo "notes<<NOTES_EOF"
+            cat /tmp/tag_notes.txt
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
