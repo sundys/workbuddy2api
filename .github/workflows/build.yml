@@ -170,11 +170,11 @@ jobs:
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/tags/${obj_sha}" \
             > /tmp/tag.json
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, re
+          import json
           d = json.load(open('/tmp/tag.json'))
-          # message 即打 tag 时 -m 全文；仓库历史 tag 的换行被 git 存为字面 \n，一并还原。
+          # message 即打 tag 时 -m 全文。json.load 已把 JSON 里的 \n 转义解码为
+          # 真实换行，无需再处理（v1.2.3 实证：re.sub 反而把真实换行转回字面 \n）。
           body = d.get('message') or ''
-          body = re.sub(r'\\n', '\n', body)
           print('notes<<NOTES_EOF')
           print(body)
           print('NOTES_EOF')
