@@ -157,15 +157,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # 先查 ref 拿 tag 对象 SHA（轻量 tag 直接是 commit，无 message）：
+          # /git/tags/{tag} 端点不存在，必须经 ref 两跳（v1.2.2 实证 404）。
+          obj_sha="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["object"]["sha"])')"
+          # 读 tag 对象：annotated tag 带 message；轻量 tag object.type=commit 无该字段 → 空正文。
           curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/tags/${GITHUB_REF#refs/tags/}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/tags/${obj_sha}" \
             > /tmp/tag.json
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, re
           d = json.load(open('/tmp/tag.json'))
-          # tag 对象的 message 即打 tag 时的 -m 全文（subject 与 body 以空行连接，
-          # 仓库历史 tag 里 -m 的换行被 git 存为字面 \n，一并还原）。
+          # message 即打 tag 时 -m 全文；仓库历史 tag 的换行被 git 存为字面 \n，一并还原。
           body = d.get('message') or ''
           body = re.sub(r'\\n', '\n', body)
           print('notes<<NOTES_EOF')
